@@ -223,7 +223,7 @@ long rd_update(in_addr_t ip, long p,long base)
     char arg[100];
     const char** rrd_argv = calloc(sizeof(char*),1);
     sprintf(arg,"N:%ld",res);
-    printf("faccio update: %s p:%lu base: %lu",arg, p, base);
+    printf("faccio update: %s p:%lu base: %lu\n",arg, p, base);
     rrd_argv[0] = arg;
     int ret = rrd_update_r(rrdfile,NULL,rrd_argc, rrd_argv); 
     if (ret != 0) {
@@ -237,50 +237,7 @@ long rd_update(in_addr_t ip, long p,long base)
 
 /*************************************************/
 
-void print_hash_entry(void *key, size_t ksize, uintptr_t d, void *usr)
-{
-    DATA *data = (DATA *)d;
-    long delta = data->time_dst.tv_sec - data->time_src.tv_sec;
-    if (!(data->src && !data->dst))
-    {
-        if ((delta==0 && data->tx_packet==0 && data->rx_packet>10)||delta > 20) //Black hole
-        {
-            print_line_table(0);
-            if (roaring_bitmap_contains(bitmap_BH, *(in_addr_t *)key))
-                data->rx_packet_base = rd_update(*(in_addr_t *)key, data->rx_packet, data->rx_packet_base);
-            else
-            {
-                roaring_bitmap_add(bitmap_BH, *(in_addr_t *)key);
-                data->rx_packet_base = data->rx_packet;
-                rd_create(*(in_addr_t *)key);
-            }
-        }
-        else if (delta > 10) //probably blackhole
-        {
-            print_line_table(1);
-            if (roaring_bitmap_contains(bitmap_BH, *(in_addr_t *)key))
-                data->rx_packet_base = rd_update(*(in_addr_t *)key, data->rx_packet, data->rx_packet_base);
-            else
-            {
-                roaring_bitmap_add(bitmap_BH, *(in_addr_t *)key);
-                data->rx_packet_base = data->rx_packet;
-                rd_create(*(in_addr_t *)key);
-            }
-        }
-        else if ((roaring_bitmap_contains(bitmap_BH, *(in_addr_t *)key) && delta < 5)) // Back to send Packets
-        {
-            print_line_table(2);
-            roaring_bitmap_remove(bitmap_BH, *(in_addr_t *)key);
-            char rrdfile[100];
-            sprintf(rrdfile, "rrd_bin/db/%s", intoa(ntohl(*(in_addr_t *)key)));
-            remove(rrdfile);
-            sprintf(rrdfile, "rrd_bin/graph/%s", intoa(ntohl(*(in_addr_t *)key)));
-            remove(rrdfile);
-        }
-        else {//normal Host 
-            print_line_table(2); 
-        }
-
+void print_data(DATA *data,void *key){
         time_t d_time = data->time_dst.tv_sec;
         time_t s_time = data->time_src.tv_sec;
         struct tm *dst_time = localtime(&d_time);
@@ -290,14 +247,66 @@ void print_hash_entry(void *key, size_t ksize, uintptr_t d, void *usr)
         printf(" %2lld.%2lld.%-6lld |",(long long)src_time->tm_hour, (long long)src_time->tm_min, (long long)src_time->tm_sec);
         printf(" %6ld:%-6ld |\n", data->rx_packet, data->tx_packet);
         
-        struct Result* res = traverseTree(data->root,data->t_patricia);
-        printf("sender:\n");
-        for (int i=0; i<data->t_patricia; i++) {
+}
+
+/*************************************************/
+
+void print_hash_entry(void *key, size_t ksize, uintptr_t d, void *usr)
+{
+    DATA *data = (DATA *)d;
+    long delta = data->time_dst.tv_sec - data->time_src.tv_sec;
+    if (!(data->src && !data->dst))
+    {
+        if ((delta==0 && data->tx_packet==0 && data->rx_packet>10)||delta > 20) //Black hole
+        {
+            if (roaring_bitmap_contains(bitmap_BH, *(in_addr_t *)key))
+                data->rx_packet_base = rd_update(*(in_addr_t *)key, data->rx_packet, data->rx_packet_base);
+            else
+            {
+                roaring_bitmap_add(bitmap_BH, *(in_addr_t *)key);
+                data->rx_packet_base = data->rx_packet;
+                rd_create(*(in_addr_t *)key);
+            }
+            print_line_table(0);
+            print_data(data, key);
+            struct Result* res = traverseTree(data->root,data->t_patricia);
+            printf("sender:\n");
+            for (int i=0; i<data->t_patricia; i++) {
             printf("   ip: %s con le porte: ", intoa(ntohl(res[i].ip)));
             roaring_iterate(res[i].ports, iter, NULL);
             printf("\n");
         }
         free(res);
+        }
+        else if (delta > 10) //probably blackhole
+        {            
+            if (roaring_bitmap_contains(bitmap_BH, *(in_addr_t *)key))
+                data->rx_packet_base = rd_update(*(in_addr_t *)key, data->rx_packet, data->rx_packet_base);
+            else
+            {
+                roaring_bitmap_add(bitmap_BH, *(in_addr_t *)key);
+                data->rx_packet_base = data->rx_packet;
+                rd_create(*(in_addr_t *)key);
+            }
+            print_line_table(1);
+            print_data(data, key);
+        }
+        else if ((roaring_bitmap_contains(bitmap_BH, *(in_addr_t *)key) && delta < 5)) // Back to send Packets
+        {
+            printf("Back to send packets\n");
+            print_line_table(2);
+            roaring_bitmap_remove(bitmap_BH, *(in_addr_t *)key);
+            char rrdfile[100];
+            sprintf(rrdfile, "rrd_bin/db/%s", intoa(ntohl(*(in_addr_t *)key)));
+            remove(rrdfile);
+            sprintf(rrdfile, "rrd_bin/graph/%s", intoa(ntohl(*(in_addr_t *)key)));
+            remove(rrdfile);            
+            print_data(data, key);
+        }
+        else {//normal Host 
+            print_line_table(2); 
+            print_data(data, key);
+        }
     }
 
 }
@@ -318,10 +327,8 @@ void print_stats()
     if ((cont % GRAPH_SLEEP) == 0) { rd_graph(); }
     if (cont >= OPTIMIZE_SLEEP)
     {
-        //hashmap_iterate(hash_BH, optimize_entry, NULL);
         cont = 0;
     }
-    //roaring_bitmap_run_optimize(bitmap_BH);
 }
 
 /*************************************************/
